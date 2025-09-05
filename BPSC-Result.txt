@@ -1,0 +1,359 @@
+/**
+ * Serves the HTML file as a web application.
+ * @param {Object} e Event object.
+ * @returns {HtmlOutput} HTML file.
+ */
+function doGet(e) {
+  return HtmlService.createTemplateFromFile('Index').evaluate();
+}
+
+/**
+ * Retrieves full result data for a student using their ID and Class.
+ *
+ * @param {string} studentId The student's ID number.
+ * @param {string} studentClass The student's class.
+ * @returns {Object} Result data, or an error message.
+ */
+function getStudentData(studentId, studentClass) {
+  Logger.log('Function getStudentData called.');
+  Logger.log('Received studentId (from web app): "' + studentId + '"');
+  Logger.log('Received studentClass (from web app): "' + studentClass + '"');
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    Logger.log('Error: Active spreadsheet not found.');
+    return { error: 'Active spreadsheet not found.' }; // Translated message
+  }
+  Logger.log('Active Spreadsheet Name: ' + ss.getName());
+  Logger.log('Active Spreadsheet ID: ' + ss.getId());
+
+  // Add Class_Subjects to the list of sheets to load
+  const sheetNames = ['Student_Info', 'Marks_1st_Midterm', 'Marks_Half_Yearly', 'Subject_Full_Marks', 'Grade_Scale', 'Class_Subjects'];
+  const sheets = {};
+  for (const name of sheetNames) {
+    sheets[name] = ss.getSheetByName(name);
+    if (!sheets[name]) {
+      Logger.log(`Error: Sheet "${name}" not found.`);
+      return { error: `Sheet "${name}" not found. Please ensure all sheets are present with correct names: ${sheetNames.join(', ')}` }; // Translated message
+    }
+    Logger.log(`Sheet "${name}" loaded successfully.`);
+  }
+
+  // Load Grade Scale data
+  const gradeScaleData = sheets.Grade_Scale.getDataRange().getValues();
+  const gradeScaleHeaders = gradeScaleData.length > 0 ? gradeScaleData.shift() : [];
+  if (gradeScaleHeaders.length === 0) {
+      Logger.log('Error: Grade_Scale sheet is empty or headers are missing.');
+      return { error: 'Grade_Scale sheet is empty or headers are missing.' }; // Translated message
+  }
+  const gradeScale = gradeScaleData.map(row => {
+    return {
+      min: row[gradeScaleHeaders.indexOf('Min_Marks')],
+      max: row[gradeScaleHeaders.indexOf('Max_Marks')],
+      grade: row[gradeScaleHeaders.indexOf('Grade_Letter')],
+      gpa: row[gradeScaleHeaders.indexOf('GPA')]
+    };
+  });
+  Logger.log('Grade Scale loaded. Example: ' + JSON.stringify(gradeScale[0]));
+
+
+  // Find student information
+  const studentInfoData = sheets.Student_Info.getDataRange().getValues();
+  const studentInfoHeaders = studentInfoData.length > 0 ? studentInfoData.shift() : [];
+  if (studentInfoHeaders.length === 0) {
+      Logger.log('Error: Student_Info sheet is empty or headers are missing.');
+      return { error: 'Student_Info sheet is empty or headers are missing.' }; // Translated message
+  }
+  Logger.log('Student_Info Headers: ' + studentInfoHeaders.join(', '));
+  const idIndex = studentInfoHeaders.indexOf('ID');
+  const classIndex = studentInfoHeaders.indexOf('Class');
+  const nameIndex = studentInfoHeaders.indexOf('Name');
+  const rollIndex = studentInfoHeaders.indexOf('Roll');
+  const sectionIndex = studentInfoHeaders.indexOf('Section');
+
+  if (idIndex === -1 || classIndex === -1 || nameIndex === -1 || rollIndex === -1 || sectionIndex === -1) {
+      Logger.log('Error: Missing required headers in Student_Info (ID, Name, Class, Section, Roll). Actual headers: ' + studentInfoHeaders.join(', '));
+      return { error: 'Missing required headers in Student_Info (ID, Name, Class, Section, Roll).' }; // Translated message
+  }
+
+
+  Logger.log('Searching for student in Student_Info...');
+  const studentRow = studentInfoData.find((row, index) => {
+    // Trim spaces and ensure string comparison for ID and Class
+    const sheetId = String(row[idIndex]).trim();
+    const sheetClass = String(row[classIndex]).trim();
+    const inputId = String(studentId).trim();
+    const inputClass = String(studentClass).trim();
+
+    return sheetId === inputId && sheetClass === inputClass;
+  });
+
+  if (!studentRow) {
+    Logger.log(`No student found with ID "${studentId}" and class "${studentClass}" in Student_Info sheet.`);
+    return { error: `No student found with ID ${studentId} and class ${studentClass}.` }; // Translated message
+  }
+
+  Logger.log('Student row found: ' + JSON.stringify(studentRow));
+
+  const studentName = studentRow[nameIndex];
+  const studentRoll = studentRow[rollIndex];
+  const studentSection = studentRow[sectionIndex];
+
+  // Find exam marks
+  const getMarksBySheet = (sheet, studentId, studentClass) => {
+    Logger.log(`Attempting to get marks from sheet: "${sheet.getName()}"`);
+    const data = sheet.getDataRange().getValues();
+    const headers = data.length > 0 ? data.shift() : [];
+    if (headers.length === 0) {
+        Logger.log(`Error: Marks sheet "${sheet.getName()}" is empty or headers are missing.`);
+        return {}; // Return empty object instead of null
+    }
+
+    // Trim headers before finding index for robust matching
+    const trimmedHeaders = headers.map(header => String(header).trim());
+
+    const sheetIdIndex = trimmedHeaders.indexOf('ID');
+    const sheetClassIndex = trimmedHeaders.indexOf('Class');
+    if (sheetIdIndex === -1 || sheetClassIndex === -1) {
+        Logger.log(`Error: Missing 'ID' or 'Class' header in marks sheet "${sheet.getName()}". Raw Headers: ${headers.join(', ')}`);
+        return {}; // Return empty object instead of null
+    }
+    Logger.log(`Trimmed Headers for "${sheet.getName()}": ${trimmedHeaders.join(', ')}`);
+
+    const marksRow = data.find((row, index) => {
+      const sheetRowId = String(row[sheetIdIndex]).trim();
+      const sheetRowClass = String(row[sheetClassIndex]).trim();
+      const inputId = String(studentId).trim();
+      const inputClass = String(studentClass).trim();
+      
+      return sheetRowId === inputId && sheetRowClass === inputClass;
+    });
+
+    if (!marksRow) {
+      Logger.log(`No marks row found for ID "${studentId}" and Class "${studentClass}" in sheet "${sheet.getName()}".`);
+      return {}; // Return empty object instead of null
+    }
+
+    const marks = {};
+    headers.forEach((header, index) => {
+      const trimmedHeader = String(header).trim();
+      if (trimmedHeader !== 'ID' && trimmedHeader !== 'Class') {
+        marks[trimmedHeader] = marksRow[index];
+      }
+    });
+    Logger.log(`Marks found in "${sheet.getName()}" for "${studentId}": ` + JSON.stringify(marks));
+    return marks;
+  };
+
+  const midtermMarks = getMarksBySheet(sheets.Marks_1st_Midterm, studentId, studentClass);
+  const halfYearlyMarks = getMarksBySheet(sheets.Marks_Half_Yearly, studentId, studentClass);
+
+  if (Object.keys(midtermMarks).length === 0 && Object.keys(halfYearlyMarks).length === 0) {
+    Logger.log('Midterm marks found: ' + (Object.keys(midtermMarks).length > 0) + ', Half Yearly marks found: ' + (Object.keys(halfYearlyMarks).length > 0));
+    return { error: 'Exam marks not found for this ID and Class. Please ensure data exists in both exam marks sheets.' };
+  }
+
+  const resultTable = [];
+  let totalMidtermMarksObtained = 0;
+  let totalHalfYearlyMarksObtained = 0;
+  let totalPossibleMidtermMarksOverall = 0;
+  let totalPossibleHalfYearlyMarksOverall = 0;
+  let totalSubjectsForGPA = 0;
+  let totalGPA = 0;
+  let hasFailedSubject = false; // Flag to check if any subject has 'F' grade
+
+  // Load full marks for subjects
+  const fullMarksData = sheets.Subject_Full_Marks.getDataRange().getValues();
+  const fullMarksHeaders = fullMarksData.length > 0 ? fullMarksData.shift() : [];
+  if (fullMarksHeaders.length === 0) {
+      Logger.log('Error: Subject_Full_Marks sheet is empty or headers are missing.');
+      return { error: 'Subject_Full_Marks sheet is empty or headers are missing.' };
+  }
+  const subjectFullMarks = {};
+  fullMarksData.forEach(row => {
+    const subjectName = row[fullMarksHeaders.indexOf('Subject')];
+    if (subjectName) {
+        subjectFullMarks[subjectName.trim()] = {
+            midterm: row[fullMarksHeaders.indexOf('Full_Marks_1st_Midterm')] || 0,
+            halfYearly: row[fullMarksHeaders.indexOf('Full_Marks_Half_Yearly')] || 0
+        };
+    }
+  });
+  Logger.log('Subject Full Marks loaded: ' + JSON.stringify(subjectFullMarks));
+
+  // Load class-specific subjects
+  const classSubjectsData = sheets.Class_Subjects.getDataRange().getValues();
+  const classSubjectsHeaders = classSubjectsData.length > 0 ? classSubjectsData.shift() : [];
+  const classSubjectIndex = classSubjectsHeaders.indexOf('Class');
+  const subjectsListIndex = classSubjectsHeaders.indexOf('Subjects');
+
+  let relevantSubjects = [];
+  const classRow = classSubjectsData.find(row => String(row[classSubjectIndex]).trim() === String(studentClass).trim());
+
+  if (classRow && subjectsListIndex !== -1) {
+    relevantSubjects = String(classRow[subjectsListIndex]).split(',').map(s => s.trim());
+    Logger.log(`Relevant subjects for class "${studentClass}": ${relevantSubjects.join(', ')}`);
+  } else {
+    Logger.log(`Warning: No specific subjects found for class "${studentClass}" in Class_Subjects sheet. Displaying all subjects with marks.`);
+    // Fallback to previous logic if class not found in Class_Subjects
+    const uniqueSubjects = new Set();
+    if (Object.keys(midtermMarks).length > 0) { // Check if midtermMarks is not an empty object
+      Object.keys(midtermMarks).forEach(sub => uniqueSubjects.add(sub.trim()));
+    }
+    if (Object.keys(halfYearlyMarks).length > 0) { // Check if halfYearlyMarks is not an empty object
+      Object.keys(halfYearlyMarks).forEach(sub => uniqueSubjects.add(sub.trim()));
+    }
+    relevantSubjects = Array.from(uniqueSubjects);
+  }
+  
+  if (relevantSubjects.length === 0) {
+      Logger.log('Warning: No relevant subjects found for calculation for this student/class.');
+      return { error: 'No relevant subjects found for this class and ID. Please verify the Class_Subjects sheet.' };
+  }
+
+
+  relevantSubjects.forEach(subject => {
+    // Get marks (default to 0 if not found in specific exam for this subject)
+    const midtermMark = (midtermMarks[subject] !== undefined && !isNaN(parseInt(midtermMarks[subject]))) ? parseInt(midtermMarks[subject]) : 0;
+    const halfYearlyMark = (halfYearlyMarks[subject] !== undefined && !isNaN(parseInt(halfYearlyMarks[subject]))) ? parseInt(halfYearlyMarks[subject]) : 0;
+
+    // Get full marks (default to 0 if not defined in Subject_Full_Marks or if subject doesn't exist there)
+    const fullMidtermMark = subjectFullMarks[subject]?.midterm || 0;
+    const fullHalfYearlyMark = subjectFullMarks[subject]?.halfYearly || 0;
+
+    totalMidtermMarksObtained += midtermMark;
+    totalHalfYearlyMarksObtained += halfYearlyMark;
+    totalPossibleMidtermMarksOverall += fullMidtermMark;
+    totalPossibleHalfYearlyMarksOverall += fullHalfYearlyMark;
+
+
+    const combinedTotalMark = midtermMark + halfYearlyMark;
+    const combinedFullMark = fullMidtermMark + fullHalfYearlyMark;
+
+    let percentage = 0;
+    // Calculate percentage based on available full marks.
+    // If only Half Yearly exam for a subject (fullMidtermMark is 0), percentage will be based on Half Yearly alone.
+    if (combinedFullMark > 0) {
+      percentage = (combinedTotalMark / combinedFullMark) * 100;
+    } else if (fullHalfYearlyMark > 0 && midtermMark === 0 && fullMidtermMark === 0) {
+        // Case: Only Half Yearly exam has full marks defined (Midterm is N/A for this subject)
+        percentage = (halfYearlyMark / fullHalfYearlyMark) * 100;
+    }
+
+
+    const { grade, gpa } = getGradeAndGPA(percentage, gradeScale);
+
+    // Set hasFailedSubject flag if any subject has 'F' grade
+    if (grade === 'F') { // Use grade letter directly for failure check
+        hasFailedSubject = true;
+    }
+
+    // Display 'N/A' if mark is 0 AND full mark for that exam is also 0
+    const displayMidtermMark = (midtermMark === 0 && fullMidtermMark === 0) ? 'N/A' : midtermMark;
+    const displayHalfYearlyMark = (halfYearlyMark === 0 && fullHalfYearlyMark === 0) ? 'N/A' : halfYearlyMark;
+
+    resultTable.push({
+      subject: subject,
+      fullMidtermMark: fullMidtermMark,
+      midtermMark: displayMidtermMark,
+      fullHalfYearlyMark: fullHalfYearlyMark,
+      halfYearlyMark: displayHalfYearlyMark,
+      percentage: percentage.toFixed(0), // Rounded to whole number
+      grade: grade,
+      gpa: gpa.toFixed(2)
+    });
+
+    if (gpa > 0) {
+      totalGPA += gpa;
+      totalSubjectsForGPA++;
+    }
+  });
+
+  let overallGPA = 0;
+  if (totalSubjectsForGPA > 0) {
+    overallGPA = totalGPA / totalSubjectsForGPA;
+  } else {
+    overallGPA = 0.0;
+  }
+
+  // Calculate overall grade letter based on overall GPA
+  let overallGrade = '';
+  if (hasFailedSubject) {
+      overallGrade = 'F';
+      overallGPA = 0.0; // Ensure GPA is 0.0 if overall grade is F
+  } else {
+      overallGrade = getGradeLetterFromGPA(overallGPA, gradeScale);
+  }
+
+  // totalOverallObtainedMarks and totalOverallPossibleMarks are not directly used for final overall grade decision now,
+  // but kept for completeness if needed elsewhere.
+  const totalOverallObtainedMarks = totalMidtermMarksObtained + totalHalfYearlyMarksObtained;
+  const totalOverallPossibleMarks = totalPossibleMidtermMarksOverall + totalPossibleHalfYearlyMarksOverall;
+  let overallPercentage = 0;
+  if (totalOverallPossibleMarks > 0) {
+    overallPercentage = (totalOverallObtainedMarks / totalOverallPossibleMarks) * 100;
+  }
+
+
+  Logger.log('Overall Result: ' + JSON.stringify({ overallPercentage: overallPercentage.toFixed(0), overallGPA: overallGPA.toFixed(2), overallGrade: overallGrade }));
+
+  return {
+    studentInfo: {
+      id: studentId,
+      name: studentName,
+      roll: studentRoll,
+      class: studentClass,
+      section: studentSection,
+    },
+    results: resultTable,
+    overallResult: {
+      overallPercentage: overallPercentage.toFixed(0),
+      overallGPA: overallGPA.toFixed(2),
+      overallGrade: overallGrade
+    }
+  };
+}
+
+/**
+ * Given a GPA, determines the grade letter based on the provided grade scale.
+ * This function assumes the grade scale's GPA values represent the GPA achieved
+ * at the *minimum* percentage for that grade. It finds the highest grade
+ * whose associated GPA (from gradeScale) is less than or equal to the input GPA.
+ *
+ * @param {number} inputGpa The GPA to look up.
+ * @param {Array<Object>} gradeScale The grade scale data (containing min, max, grade, gpa).
+ * @returns {string} The corresponding grade letter.
+ */
+function getGradeLetterFromGPA(inputGpa, gradeScale) {
+  // Sort gradeScale by GPA in descending order to find the highest qualifying grade first
+  // This is crucial for correctly mapping GPAs to their corresponding letter grades.
+  gradeScale.sort((a, b) => b.gpa - a.gpa);
+
+  for (let i = 0; i < gradeScale.length; i++) {
+    const scale = gradeScale[i];
+    if (inputGpa >= scale.gpa) {
+      return scale.grade;
+    }
+  }
+  return 'F'; // Default to F if no matching GPA found (e.g., GPA < lowest defined in scale)
+}
+
+
+/**
+ * Given a percentage, determines the grade letter and GPA based on the provided grade scale.
+ * @param {number} percentage The student's obtained percentage.
+ * @param {Array<Object>} gradeScale The grade scale data.
+ * @returns {Object} An object containing the grade and GPA.
+ */
+function getGradeAndGPA(percentage, gradeScale) {
+  // Sort gradeScale by min value in descending order to ensure correct grade assignment for overlaps
+  gradeScale.sort((a, b) => b.min - a.min);
+
+  for (let i = 0; i < gradeScale.length; i++) {
+    const scale = gradeScale[i];
+    if (percentage >= scale.min) {
+      return { grade: scale.grade, gpa: scale.gpa };
+    }
+  }
+  return { grade: 'F', gpa: 0.0 };
+}
